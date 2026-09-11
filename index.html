@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이미지 → ASCII 아트</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", sans-serif;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 24px 16px 48px;
+    background: #fafafa;
+    color: #222;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .hint { color: #666; font-size: 0.9rem; margin-top: 0; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+  .status { font-size: 0.9rem; color: #555; }
+  .status.error { color: #c0392b; }
+  .preview { max-width: 220px; max-height: 220px; display: block; margin: 12px 0; border: 1px solid #ddd; }
+  .options { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin: 16px 0; font-size: 0.9rem; }
+  .options label { display: flex; align-items: center; gap: 6px; }
+  .size-info { font-size: 0.85rem; color: #666; margin: 4px 0; }
+  .result {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 6px;
+    line-height: 1;
+    white-space: pre;
+    overflow-x: auto;
+    background: #fff;
+    border: 1px solid #ddd;
+    padding: 8px;
+    min-height: 40px;
+  }
+  .actions { display: flex; gap: 8px; margin-top: 12px; }
+  button { padding: 6px 14px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <h1>이미지 → ASCII 아트</h1>
+  <p class="hint">이미지는 브라우저 안에서만 처리되고 서버로 전송되지 않습니다.</p>
+
+  <div class="row">
+    <input type="file" id="fileInput" accept="image/*">
+    <span id="status" class="status"></span>
+  </div>
+
+  <img id="preview" class="preview" hidden alt="원본 미리보기">
+
+  <div class="options" id="options" hidden>
+    <label>문자셋
+      <select id="charsetSelect">
+        <option value="dense">기본 (@%#*+=-:. )</option>
+        <option value="simple">단순 (@*:. )</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="colorCheck"> 컬러</label>
+    <label>폭
+      <input type="range" id="widthRange" min="40" max="160" value="100">
+      <span id="widthValue">100</span>열
+    </label>
+  </div>
+
+  <div id="sizeInfo" class="size-info"></div>
+  <pre id="result" class="result"></pre>
+
+  <div class="actions" id="actions" hidden>
+    <button id="copyBtn">텍스트 복사</button>
+    <button id="downloadBtn">TXT 다운로드</button>
+  </div>
+
+<script>
+(function () {
+  var MAX_FILE_SIZE = 10 * 1024 * 1024;
+  var MAX_ROWS = 200;
+  var CHARSETS = {
+    dense: '@%#*+=-:. ',
+    simple: '@*:. '
+  };
+
+  var fileInput = document.getElementById('fileInput');
+  var statusEl = document.getElementById('status');
+  var preview = document.getElementById('preview');
+  var optionsEl = document.getElementById('options');
+  var charsetSelect = document.getElementById('charsetSelect');
+  var colorCheck = document.getElementById('colorCheck');
+  var widthRange = document.getElementById('widthRange');
+  var widthValue = document.getElementById('widthValue');
+  var sizeInfo = document.getElementById('sizeInfo');
+  var resultEl = document.getElementById('result');
+  var actionsEl = document.getElementById('actions');
+  var copyBtn = document.getElementById('copyBtn');
+  var downloadBtn = document.getElementById('downloadBtn');
+
+  var objectUrl = null;
+  var token = 0;
+  var sourceImage = null;
+  var plainText = '';
+  var charCellRatio = measureCharCellRatio();
+
+  function measureCharCellRatio() {
+    var fontSize = 10;
+    var canvas = document.createElement('canvas');
+    var ctx = canvas.getContext('2d');
+    ctx.font = fontSize + 'px monospace';
+    var charWidth = ctx.measureText('M').width;
+    return charWidth / fontSize; // pre의 line-height:1과 맞춘 세로 보정값
+  }
+
+  function showStatus(msg, isError) {
+    statusEl.textContent = msg;
+    statusEl.classList.toggle('error', !!isError);
+  }
+
+  function resetResult() {
+    sourceImage = null;
+    plainText = '';
+    resultEl.textContent = '';
+    sizeInfo.textContent = '';
+    actionsEl.hidden = true;
+    optionsEl.hidden = true;
+    preview.hidden = true;
+  }
+
+  function handleFileChange(e) {
+    var file = e.target.files && e.target.files[0];
+    resetResult();
+    if (!file) { showStatus('', false); return; }
+    if (file.type.indexOf('image/') !== 0) {
+      showStatus('이미지 파일만 선택할 수 있습니다.', true);
+      return;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      showStatus('파일이 너무 큽니다 (최대 10MB).', true);
+      return;
+    }
+
+    token += 1;
+    var myToken = token;
+    if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+    objectUrl = URL.createObjectURL(file);
+
+    var img = new Image();
+    img.onload = function () {
+      if (myToken !== token) return;
+      sourceImage = img;
+      preview.src = objectUrl;
+      preview.hidden = false;
+      optionsEl.hidden = false;
+      showStatus('변환 완료', false);
+      render();
+    };
+    img.onerror = function () {
+      if (myToken !== token) return;
+      showStatus('이미지를 불러올 수 없습니다.', true);
+      if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+    };
+    showStatus('불러오는 중...', false);
+    img.src = objectUrl;
+  }
+
+  function render() {
+    if (!sourceImage) return;
+
+    var cols = parseInt(widthRange.value, 10);
+    var w = sourceImage.naturalWidth;
+    var h = sourceImage.naturalHeight;
+    var rows = Math.max(1, Math.round((h / w) * cols * charCellRatio));
+    if (rows > MAX_ROWS) {
+      var scale = MAX_ROWS / rows;
+      cols = Math.max(1, Math.round(cols * scale));
+      rows = MAX_ROWS;
+    }
+
+    var canvas = document.createElement('canvas');
+    canvas.width = cols;
+    canvas.height = rows;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, cols, rows);
+    ctx.drawImage(sourceImage, 0, 0, cols, rows);
+    var data = ctx.getImageData(0, 0, cols, rows).data;
+
+    var charset = CHARSETS[charsetSelect.value];
+    var color = colorCheck.checked;
+    var plainLines = [];
+    var frag = document.createDocumentFragment();
+
+    for (var y = 0; y < rows; y++) {
+      var rowPlain = '';
+      for (var x = 0; x < cols; x++) {
+        var idx = (y * cols + x) * 4;
+        var r = data[idx], g = data[idx + 1], b = data[idx + 2];
+        var brightness = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        var charIdx = Math.round((brightness / 255) * (charset.length - 1));
+        var ch = charset[charIdx];
+        rowPlain += ch;
+        if (color) {
+          var span = document.createElement('span');
+          span.textContent = ch;
+          span.style.color = 'rgb(' + r + ',' + g + ',' + b + ')';
+          frag.appendChild(span);
+        }
+      }
+      plainLines.push(rowPlain);
+      if (color && y < rows - 1) frag.appendChild(document.createTextNode('\n'));
+    }
+
+    plainText = plainLines.join('\n');
+    resultEl.textContent = '';
+    if (color) {
+      resultEl.appendChild(frag);
+    } else {
+      resultEl.textContent = plainText;
+    }
+
+    sizeInfo.textContent = '출력 크기: ' + cols + '×' + rows;
+    actionsEl.hidden = false;
+  }
+
+  function selectResultText() {
+    var range = document.createRange();
+    range.selectNodeContents(resultEl);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  function copyText() {
+    if (!plainText) return;
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      selectResultText();
+      showStatus('자동 복사를 지원하지 않습니다. 결과가 선택되어 있으니 Ctrl+C로 복사하세요.', true);
+      return;
+    }
+    navigator.clipboard.writeText(plainText).then(function () {
+      showStatus('클립보드에 복사했습니다.', false);
+    }, function () {
+      selectResultText();
+      showStatus('자동 복사에 실패했습니다. 결과가 선택되어 있으니 Ctrl+C로 복사하세요.', true);
+    });
+  }
+
+  function downloadText() {
+    if (!plainText) return;
+    var blob = new Blob([plainText], { type: 'text/plain' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'ascii-art.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  fileInput.addEventListener('change', handleFileChange);
+  charsetSelect.addEventListener('change', render);
+  colorCheck.addEventListener('change', render);
+  widthRange.addEventListener('input', function () {
+    widthValue.textContent = widthRange.value;
+  });
+  widthRange.addEventListener('change', render);
+  copyBtn.addEventListener('click', copyText);
+  downloadBtn.addEventListener('click', downloadText);
+})();
+</script>
+</body>
+</html>
